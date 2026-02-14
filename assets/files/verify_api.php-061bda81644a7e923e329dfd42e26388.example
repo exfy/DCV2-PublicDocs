@@ -1,0 +1,342 @@
+<?php
+/**
+ * DCV3 Verify API - MySQL/MariaDB Backend
+ * Synchronisiert Verify-Aktionen mit einer Datenbank
+ *
+ * Datenbank-Tabelle: dcv3_verify
+ * Verwendet mysqli prepared statements für sichere Datenbankoperationen
+ */
+
+// Fehlerbehandlung
+error_reporting(E_ALL);
+ini_set('display_errors', 0);
+header('Content-Type: application/json; charset=utf-8');
+
+// CORS Headers (optional, je nach Setup)
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: POST');
+header('Access-Control-Allow-Headers: Content-Type');
+
+// Datenbank-Konfiguration
+define('DB_HOST', 'localhost');
+define('DB_USER', 'your_db_user');
+define('DB_PASS', 'your_db_password');
+define('DB_NAME', 'your_db_name');
+define('DB_TABLE', 'dcv3_verify'); // Tabellenname
+define('API_KEY', 'your_secure_api_key_here'); // Sicheren API-Schlüssel setzen!
+
+// Datenbankverbindung herstellen
+$mysqli = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+
+// Verbindung prüfen
+if ($mysqli->connect_error) {
+    sendError('Datenbankverbindung fehlgeschlagen: ' . $mysqli->connect_error, 500);
+}
+
+// UTF-8 Encoding setzen
+$mysqli->set_charset('utf8mb4');
+
+// Request-Body einlesen
+$input = file_get_contents('php://input');
+$data = json_decode($input, true);
+
+// JSON-Validierung
+if (json_last_error() !== JSON_ERROR_NONE) {
+    sendError('Ungültiges JSON-Format', 400);
+}
+
+// API-Key Validierung
+if (!isset($data['api_key']) || $data['api_key'] !== API_KEY) {
+    sendError('Ungültiger API-Schlüssel', 401);
+}
+
+// Action Parameter prüfen
+if (!isset($data['action'])) {
+    sendError('Fehlender Action-Parameter', 400);
+}
+
+$action = $data['action'];
+
+// Action Router
+switch ($action) {
+    case 'create':
+        createVerifyEntry($mysqli, $data);
+        break;
+
+    case 'import':
+        importVerifyEntry($mysqli, $data);
+        break;
+
+    case 'update_status':
+        updateVerifyStatus($mysqli, $data);
+        break;
+
+    case 'update_status_by_uuid':
+        updateVerifyStatusByUuid($mysqli, $data);
+        break;
+
+    case 'update_name_uuid':
+        updateNameAndUuid($mysqli, $data);
+        break;
+
+    case 'delete':
+        deleteVerifyEntry($mysqli, $data);
+        break;
+
+    case 'test':
+        sendSuccess('Verbindungstest erfolgreich', ['version' => '1.0']);
+        break;
+
+    default:
+        sendError('Unbekannte Action: ' . $action, 400);
+}
+
+$mysqli->close();
+
+/**
+ * Erstellt einen neuen Verify-Eintrag
+ */
+function createVerifyEntry($mysqli, $data) {
+    // Parameter validieren
+    if (!isset($data['discordId']) || !isset($data['minecraftName']) ||
+        !isset($data['uuid']) || !isset($data['verifyCode'])) {
+        sendError('Fehlende Parameter für create', 400);
+    }
+
+    $discordId = $data['discordId'];
+    $minecraftName = $data['minecraftName'];
+    $uuid = $data['uuid'];
+    $verifyCode = $data['verifyCode'];
+    $verified = isset($data['verified']) ? (int)$data['verified'] : 0;
+
+    // Prüfen ob Eintrag bereits existiert
+    $checkStmt = $mysqli->prepare("SELECT id FROM " . DB_TABLE . " WHERE discordId = ?");
+    $checkStmt->bind_param("i", $discordId);
+    $checkStmt->execute();
+    $checkResult = $checkStmt->get_result();
+
+    if ($checkResult->num_rows > 0) {
+        $checkStmt->close();
+        sendError('Eintrag existiert bereits', 409);
+    }
+    $checkStmt->close();
+
+    // Neuen Eintrag erstellen
+    $stmt = $mysqli->prepare("INSERT INTO " . DB_TABLE . " (discordId, minecraftName, uuid, verifyCode, verified) VALUES (?, ?, ?, ?, ?)");
+    $stmt->bind_param("isssi", $discordId, $minecraftName, $uuid, $verifyCode, $verified);
+
+    if ($stmt->execute()) {
+        $insertId = $stmt->insert_id;
+        $stmt->close();
+        sendSuccess('Verify-Eintrag erfolgreich erstellt', [
+            'id' => $insertId,
+            'discordId' => $discordId
+        ]);
+    } else {
+        $stmt->close();
+        sendError('Fehler beim Erstellen des Eintrags: ' . $mysqli->error, 500);
+    }
+}
+
+/**
+ * Importiert einen Verify-Eintrag (überspringt wenn bereits vorhanden)
+ */
+function importVerifyEntry($mysqli, $data) {
+    // Parameter validieren
+    if (!isset($data['discordId']) || !isset($data['minecraftName']) ||
+        !isset($data['uuid']) || !isset($data['verifyCode'])) {
+        sendError('Fehlende Parameter für import', 400);
+    }
+
+    $discordId = $data['discordId'];
+    $minecraftName = $data['minecraftName'];
+    $uuid = $data['uuid'];
+    $verifyCode = $data['verifyCode'];
+    $verified = isset($data['verified']) ? (int)$data['verified'] : 0;
+
+    // Prüfen ob Eintrag bereits existiert
+    $checkStmt = $mysqli->prepare("SELECT id FROM " . DB_TABLE . " WHERE discordId = ?");
+    $checkStmt->bind_param("i", $discordId);
+    $checkStmt->execute();
+    $checkResult = $checkStmt->get_result();
+
+    if ($checkResult->num_rows > 0) {
+        $checkStmt->close();
+        sendSuccess('Eintrag existiert bereits - übersprungen', [
+            'discordId' => $discordId,
+            'skipped' => true
+        ]);
+    }
+    $checkStmt->close();
+
+    // Neuen Eintrag erstellen
+    $stmt = $mysqli->prepare("INSERT INTO " . DB_TABLE . " (discordId, minecraftName, uuid, verifyCode, verified) VALUES (?, ?, ?, ?, ?)");
+    $stmt->bind_param("isssi", $discordId, $minecraftName, $uuid, $verifyCode, $verified);
+
+    if ($stmt->execute()) {
+        $insertId = $stmt->insert_id;
+        $stmt->close();
+        sendSuccess('Verify-Eintrag erfolgreich importiert', [
+            'id' => $insertId,
+            'discordId' => $discordId,
+            'imported' => true
+        ]);
+    } else {
+        $stmt->close();
+        sendError('Fehler beim Importieren des Eintrags: ' . $mysqli->error, 500);
+    }
+}
+
+/**
+ * Aktualisiert den Verify-Status anhand der Discord-ID
+ */
+function updateVerifyStatus($mysqli, $data) {
+    if (!isset($data['discordId']) || !isset($data['verified'])) {
+        sendError('Fehlende Parameter für update_status', 400);
+    }
+
+    $discordId = $data['discordId'];
+    $verified = (int)$data['verified'];
+
+    $stmt = $mysqli->prepare("UPDATE " . DB_TABLE . " SET verified = ? WHERE discordId = ?");
+    $stmt->bind_param("ii", $verified, $discordId);
+
+    if ($stmt->execute()) {
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+
+        if ($affectedRows > 0) {
+            sendSuccess('Verify-Status erfolgreich aktualisiert', [
+                'discordId' => $discordId,
+                'verified' => (bool)$verified
+            ]);
+        } else {
+            sendError('Kein Eintrag gefunden', 404);
+        }
+    } else {
+        $stmt->close();
+        sendError('Fehler beim Aktualisieren: ' . $mysqli->error, 500);
+    }
+}
+
+/**
+ * Aktualisiert den Verify-Status anhand der UUID
+ */
+function updateVerifyStatusByUuid($mysqli, $data) {
+    if (!isset($data['uuid']) || !isset($data['verified'])) {
+        sendError('Fehlende Parameter für update_status_by_uuid', 400);
+    }
+
+    $uuid = $data['uuid'];
+    $verified = (int)$data['verified'];
+
+    $stmt = $mysqli->prepare("UPDATE " . DB_TABLE . " SET verified = ? WHERE uuid = ?");
+    $stmt->bind_param("is", $verified, $uuid);
+
+    if ($stmt->execute()) {
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+
+        if ($affectedRows > 0) {
+            sendSuccess('Verify-Status erfolgreich aktualisiert', [
+                'uuid' => $uuid,
+                'verified' => (bool)$verified
+            ]);
+        } else {
+            sendError('Kein Eintrag gefunden', 404);
+        }
+    } else {
+        $stmt->close();
+        sendError('Fehler beim Aktualisieren: ' . $mysqli->error, 500);
+    }
+}
+
+/**
+ * Aktualisiert Minecraft-Name und UUID
+ */
+function updateNameAndUuid($mysqli, $data) {
+    if (!isset($data['discordId']) || !isset($data['minecraftName']) || !isset($data['uuid'])) {
+        sendError('Fehlende Parameter für update_name_uuid', 400);
+    }
+
+    $discordId = $data['discordId'];
+    $minecraftName = $data['minecraftName'];
+    $uuid = $data['uuid'];
+
+    $stmt = $mysqli->prepare("UPDATE " . DB_TABLE . " SET minecraftName = ?, uuid = ? WHERE discordId = ?");
+    $stmt->bind_param("ssi", $minecraftName, $uuid, $discordId);
+
+    if ($stmt->execute()) {
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+
+        if ($affectedRows > 0) {
+            sendSuccess('Name und UUID erfolgreich aktualisiert', [
+                'discordId' => $discordId,
+                'minecraftName' => $minecraftName,
+                'uuid' => $uuid
+            ]);
+        } else {
+            sendError('Kein Eintrag gefunden', 404);
+        }
+    } else {
+        $stmt->close();
+        sendError('Fehler beim Aktualisieren: ' . $mysqli->error, 500);
+    }
+}
+
+/**
+ * Löscht einen Verify-Eintrag
+ */
+function deleteVerifyEntry($mysqli, $data) {
+    if (!isset($data['discordId'])) {
+        sendError('Fehlende Parameter für delete', 400);
+    }
+
+    $discordId = $data['discordId'];
+
+    $stmt = $mysqli->prepare("DELETE FROM " . DB_TABLE . " WHERE discordId = ?");
+    $stmt->bind_param("i", $discordId);
+
+    if ($stmt->execute()) {
+        $affectedRows = $stmt->affected_rows;
+        $stmt->close();
+
+        if ($affectedRows > 0) {
+            sendSuccess('Verify-Eintrag erfolgreich gelöscht', [
+                'discordId' => $discordId
+            ]);
+        } else {
+            sendError('Kein Eintrag gefunden', 404);
+        }
+    } else {
+        $stmt->close();
+        sendError('Fehler beim Löschen: ' . $mysqli->error, 500);
+    }
+}
+
+/**
+ * Sendet eine Erfolgsantwort
+ */
+function sendSuccess($message, $data = []) {
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'message' => $message,
+        'data' => $data
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+/**
+ * Sendet eine Fehlerantwort
+ */
+function sendError($message, $code = 400) {
+    http_response_code($code);
+    echo json_encode([
+        'success' => false,
+        'error' => $message
+    ], JSON_UNESCAPED_UNICODE);
+    exit;
+}
+

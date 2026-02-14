@@ -1,0 +1,349 @@
+<?php
+/**
+ * Ticket API - PHP Backend für MySQL/MariaDB Synchronisation
+ *
+ * Diese Datei muss auf einem Webserver mit PHP und MySQL/MariaDB installiert werden.
+ * Konfigurieren Sie die Datenbankverbindung und den API-Key unten.
+ */
+
+header('Content-Type: application/json; charset=utf-8');
+
+// Datenbank-Konfiguration
+define('DB_HOST', 'localhost');
+define('DB_NAME', 'ticket_system');
+define('DB_USER', 'root');
+define('DB_PASS', 'xxxxxxxxxxx');
+define('DB_CHARSET', 'utf8mb4');
+
+// API-Key Konfiguration (dieser muss mit dem Java-Code übereinstimmen)
+define('API_KEY', 'your-secret-api-key-here');
+
+// Fehlerbehandlung
+error_reporting(E_ALL);
+ini_set('display_errors', 0);
+
+// Datenbankverbindung mit mysqli
+mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
+try {
+    $mysqli = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
+    $mysqli->set_charset(DB_CHARSET);
+} catch (Exception $e) {
+    sendResponse(false, 'Datenbankverbindung fehlgeschlagen: ' . $e->getMessage());
+    exit;
+}
+
+// JSON-Input lesen
+$input = file_get_contents('php://input');
+$data = json_decode($input, true);
+
+// Validierung
+if (!$data) {
+    sendResponse(false, 'Ungültiges JSON-Format');
+    exit;
+}
+
+// API-Key Validierung
+if (!isset($data['api_key']) || $data['api_key'] !== API_KEY) {
+    sendResponse(false, 'Ungültiger API-Key', 401);
+    exit;
+}
+
+// Action bestimmen
+$action = isset($data['action']) ? $data['action'] : '';
+
+// Aktionen verarbeiten
+switch ($action) {
+    case 'test':
+        sendResponse(true, 'API-Verbindung erfolgreich');
+        break;
+
+    case 'create_ticket':
+        createTicket($mysqli, $data);
+        break;
+
+    case 'close_ticket':
+        closeTicket($mysqli, $data);
+        break;
+
+    case 'add_log':
+        addTicketLog($mysqli, $data);
+        break;
+
+    case 'add_blacklist':
+        addToBlacklist($mysqli, $data);
+        break;
+
+    case 'remove_blacklist':
+        removeFromBlacklist($mysqli, $data);
+        break;
+
+    case 'add_participant':
+        addParticipant($mysqli, $data);
+        break;
+
+    case 'remove_participant':
+        removeParticipant($mysqli, $data);
+        break;
+
+    default:
+        sendResponse(false, 'Unbekannte Aktion: ' . $action);
+        break;
+}
+
+/**
+ * Erstellt ein neues Ticket
+ */
+function createTicket($mysqli, $data) {
+    try {
+        $stmt = $mysqli->prepare("
+            INSERT INTO tickets (
+                ticket_id, channel_id, ticket_name, tag,
+                user_id, user_name, status, created_at
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, ?, NOW()
+            )
+        ");
+
+        $stmt->bind_param(
+            "sssssss",
+            $data['ticket_id'],
+            $data['channel_id'],
+            $data['ticket_name'],
+            $data['tag'],
+            $data['user_id'],
+            $data['user_name'],
+            $data['status']
+        );
+
+        $stmt->execute();
+        $insertId = $mysqli->insert_id;
+        $stmt->close();
+
+        sendResponse(true, 'Ticket erfolgreich erstellt', 200, ['id' => $insertId]);
+    } catch (Exception $e) {
+        sendResponse(false, 'Fehler beim Erstellen des Tickets: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Schließt ein Ticket
+ */
+function closeTicket($mysqli, $data) {
+    try {
+        $stmt = $mysqli->prepare("
+            UPDATE tickets
+            SET status = ?,
+                closed_by_user_id = ?,
+                closed_by_user_name = ?,
+                close_reason = ?,
+                closed_at = NOW()
+            WHERE channel_id = ?
+        ");
+
+        $stmt->bind_param(
+            "sssss",
+            $data['status'],
+            $data['closed_by_user_id'],
+            $data['closed_by_user_name'],
+            $data['close_reason'],
+            $data['channel_id']
+        );
+
+        $stmt->execute();
+        $stmt->close();
+
+        sendResponse(true, 'Ticket erfolgreich geschlossen');
+    } catch (Exception $e) {
+        sendResponse(false, 'Fehler beim Schließen des Tickets: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Fügt einen Log-Eintrag hinzu
+ */
+function addTicketLog($mysqli, $data) {
+    try {
+        $stmt = $mysqli->prepare("
+            INSERT INTO ticket_logs (
+                channel_id, user_id, user_name, message,
+                avatar_url, attachments, created_at
+            ) VALUES (
+                ?, ?, ?, ?,
+                ?, ?, NOW()
+            )
+        ");
+
+        $stmt->bind_param(
+            "ssssss",
+            $data['channel_id'],
+            $data['user_id'],
+            $data['user_name'],
+            $data['message'],
+            $data['avatar_url'],
+            $data['attachments']
+        );
+
+        $stmt->execute();
+        $insertId = $mysqli->insert_id;
+        $stmt->close();
+
+        sendResponse(true, 'Log-Eintrag erfolgreich hinzugefügt', 200, ['id' => $insertId]);
+    } catch (Exception $e) {
+        sendResponse(false, 'Fehler beim Hinzufügen des Log-Eintrags: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Fügt einen Benutzer zur Blacklist hinzu
+ */
+function addToBlacklist($mysqli, $data) {
+    try {
+        $stmt = $mysqli->prepare("
+            INSERT INTO ticket_blacklist (
+                user_id, user_name, reason, added_by_user_id, created_at
+            ) VALUES (
+                ?, ?, ?, ?, NOW()
+            )
+            ON DUPLICATE KEY UPDATE
+                user_name = ?,
+                reason = ?,
+                added_by_user_id = ?,
+                created_at = NOW()
+        ");
+
+        $stmt->bind_param(
+            "sssssss",
+            $data['user_id'],
+            $data['user_name'],
+            $data['reason'],
+            $data['added_by_user_id'],
+            $data['user_name'],
+            $data['reason'],
+            $data['added_by_user_id']
+        );
+
+        $stmt->execute();
+        $stmt->close();
+
+        sendResponse(true, 'Benutzer zur Blacklist hinzugefügt');
+    } catch (Exception $e) {
+        sendResponse(false, 'Fehler beim Hinzufügen zur Blacklist: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Entfernt einen Benutzer von der Blacklist
+ */
+function removeFromBlacklist($mysqli, $data) {
+    try {
+        $stmt = $mysqli->prepare("
+            DELETE FROM ticket_blacklist WHERE user_id = ?
+        ");
+
+        $stmt->bind_param("s", $data['user_id']);
+        $stmt->execute();
+        $stmt->close();
+
+        sendResponse(true, 'Benutzer von der Blacklist entfernt');
+    } catch (Exception $e) {
+        sendResponse(false, 'Fehler beim Entfernen von der Blacklist: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Fügt einen Teilnehmer zu einem Ticket hinzu
+ */
+function addParticipant($mysqli, $data) {
+    try {
+        $stmt = $mysqli->prepare("
+            INSERT INTO ticket_participants (
+                channel_id, user_id, role_id, added_by, created_at
+            ) VALUES (
+                ?, ?, ?, ?, NOW()
+            )
+        ");
+
+        $userId = isset($data['user_id']) ? $data['user_id'] : null;
+        $roleId = isset($data['role_id']) ? $data['role_id'] : null;
+
+        $stmt->bind_param(
+            "ssss",
+            $data['channel_id'],
+            $userId,
+            $roleId,
+            $data['added_by']
+        );
+
+        $stmt->execute();
+        $insertId = $mysqli->insert_id;
+        $stmt->close();
+
+        sendResponse(true, 'Teilnehmer erfolgreich hinzugefügt', 200, ['id' => $insertId]);
+    } catch (Exception $e) {
+        sendResponse(false, 'Fehler beim Hinzufügen des Teilnehmers: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Entfernt einen Teilnehmer von einem Ticket
+ */
+function removeParticipant($mysqli, $data) {
+    try {
+        $whereConditions = ["channel_id = ?"];
+        $params = [$data['channel_id']];
+        $types = "s";
+
+        if (isset($data['user_id'])) {
+            $whereConditions[] = "user_id = ?";
+            $params[] = $data['user_id'];
+            $types .= "s";
+        }
+
+        if (isset($data['role_id'])) {
+            $whereConditions[] = "role_id = ?";
+            $params[] = $data['role_id'];
+            $types .= "s";
+        }
+
+        $whereClause = implode(" AND ", $whereConditions);
+        $stmt = $mysqli->prepare("DELETE FROM ticket_participants WHERE " . $whereClause);
+
+        // Dynamisches Binding
+        $bindParams = array_merge([$types], $params);
+        $refs = [];
+        foreach ($bindParams as $key => $value) {
+            $refs[$key] = &$bindParams[$key];
+        }
+        call_user_func_array([$stmt, 'bind_param'], $refs);
+
+        $stmt->execute();
+        $stmt->close();
+
+        sendResponse(true, 'Teilnehmer erfolgreich entfernt');
+    } catch (Exception $e) {
+        sendResponse(false, 'Fehler beim Entfernen des Teilnehmers: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Sendet eine JSON-Response
+ */
+function sendResponse($success, $message, $code = 200, $additionalData = []) {
+    http_response_code($code);
+
+    $response = [
+        'success' => $success,
+        'message' => $message,
+        'timestamp' => date('Y-m-d H:i:s')
+    ];
+
+    if (!empty($additionalData)) {
+        $response = array_merge($response, $additionalData);
+    }
+
+    echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    exit;
+}
+
